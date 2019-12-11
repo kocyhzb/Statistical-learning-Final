@@ -1,0 +1,292 @@
+---
+title: "Final Project"
+author: "Zhibo Hu"
+date: "2019/11/29"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(caret)
+library(dplyr)
+library(ggplot2)
+library(grid)
+library(gridExtra)
+library(pROC)
+library(randomForest)
+library(gbm)
+library(xgboost)
+library(tidyverse)
+library(glmnet)
+library(tree)
+library(pdp)
+library(vip)
+```
+The Mushroom Database from UCI Database has thousands of different types of mushroom. We can roughly classify these mushrooms into to different sectors: edible(e) and poisonous(p). To help training the model, Mushroom Database provides 22 attributes for the cap (shape, surface, color), gill (attachment, spacing, size, color), bruises, stalk (shape, root, surface above ring, surface below ring, color above ring, color below ring), veil (type, color), ring (number, type), spore print color, population, habitat.
+The url is: https://archive.ics.uci.edu/ml/machine-learning-databases/mushroom/agaricus-lepiota.data
+
+To make the report clear and easy to read, I omit some part of the code. To read the specific code, please visit github:
+```{r}
+#Read the table
+Mushroom <- read.table('https://archive.ics.uci.edu/ml/machine-learning-databases/mushroom/agaricus-lepiota.data', sep = ',', fill = F)
+colnames(Mushroom) <- c('edible','cap-shape','cap-surface','cap-color','bruises','odor',
+                        'gill-attachment','gill-spacing','gill-size','gill-color',
+                        'stalk-shape','stalk-root','stalk-surface-above-ring',
+                        'stalk-surface-below-ring','stalk-color-above-ring',
+                        'stalk-color-below-ring','veil-type','veil-color',
+                        'ring-number','ring-type','spore-print-color',
+                        'population','habitat')
+```
+
+```{r,,echo=FALSE}
+print(sprintf("Number of samples: %d",nrow(Mushroom)))
+print(sprintf("Number of predictors and attributes: %d",ncol(Mushroom)))
+```
+The dataset has 8124 samples with 1 predictor and 22 variables.
+
+```{r,,echo=FALSE}
+class <- plyr::count(Mushroom$edible)
+print(sprintf("edible: %d | poisonous: %d | Percent of edible classes: %.1f%%",
+              class$freq[1],class$freq[2], round(class$freq[1]/nrow(Mushroom)*100,1)))
+```
+The percentage of edible among predictor is 51.8%, which means the class is almost divided equally.
+
+```{r,echo=FALSE}
+Mushroom$edible <- as.factor(Mushroom$edible)
+ggplot(Mushroom, aes(edible, fill = edible)) +
+  geom_bar() 
+```
+
+
+Then, let's analyze the attributes. First, transform the letters into number so that we can apply statistical learning methods.
+```{r,echo=FALSE}
+attributes = Mushroom[,2:23]
+class = Mushroom[,1]
+attributes <- sapply(attributes, function (x) as.numeric(as.factor(x)))
+```
+
+Plot the density of edible and poisonous against each attributes. 
+```{r,echo=FALSE}
+scales <- list(x=list(relation="free"),y=list(relation="free"), cex=0.6)
+featurePlot(x=attributes, y=class, plot="density",scales=scales,
+            layout = c(4,6), auto.key = list(columns = 2), pch = "|")
+```
+
+Accourding to the plots, some attributes such as spore print color, population and habitat are good separation for edible. However, both of the attributes cannot seperate class perfectly. In order to classify the predictor, statistical learning methods are applied to the binary classification problem.
+
+Seperate the dataset into training set and test set, with the porpotion of 7:3. (edible = 0, poisonous = 1)
+```{r}
+#Split the data
+mushroom <- data.frame(sapply(Mushroom, function (x) as.numeric(as.factor(x))))
+mushroom$edible = mushroom$edible - 1
+set.seed(123)
+inTrain <- createDataPartition(y=mushroom$edible, p=0.7, list = F)
+training <- mushroom[inTrain, ]
+test <- mushroom[-inTrain, ]
+n<-names(training)
+```
+
+First, fit a logistic regression on the training set and then make predictions on the test set.  Logistic regression is a statistical model that in its basic form uses a logistic function(1/(1+e^-x)) to model a binary dependent variable. This model will be used as a baseline model. Later I will compare the output between logistic regression and other statistical learning methods. Also, to calculate the runing time, I insert time label alone with each methods and will comment about it later.
+```{r}
+#Insert time lable
+t1 = proc.time()
+#Fit logistic regression
+glm.fits = glm(edible~., data=training, family=binomial)
+t2 = proc.time()
+glm.probs = predict(glm.fits, test, type="response")
+glm.pred=rep("0",nrow(test))
+glm.pred[glm.probs>.5] = "1"
+table(glm.pred,test$edible)
+print(sprintf("The predict error rate of logistic regression is: %f",mean(glm.pred!=test$edible)))
+print(sprintf("The predict accuracy of logistic regression is: %f",mean(glm.pred==test$edible)))
+t=t2-t1
+print(paste0("The running time of logistic regression is:",t[3][[1]],'s'))
+```
+The logistic regression returns a good classification, which has a very small error 3.652%. Also, the running time is very fast. All the calculations are done within 0.5 second. For the binary classification problem, logistic regression is a useless method if it can learn the features perfectly.
+
+The next model is regression tree. Note that CART use Gini Index instead of cross entropy.It is not hard to see that the Gini index takes on a small value if all of the pˆmk’s are close to zero or one.
+```{r}
+t1 = proc.time()
+#Build tree model
+tree = tree(edible~.,data = training)
+summary(tree)
+t2 = proc.time()
+t=t2-t1
+print(paste0("The running time of decision tree is:",t[3][[1]],'s'))
+```
+The tree has 12 terminal nodes and 9 attributes are used in tree construction. Plot the tree.
+```{r,echo=FALSE}
+plot(tree)
+text(tree,pretty=0)
+```
+
+For the terminal node, if the result is 1, we classify it to poisonous. If the result is samller than 1 and colse to 0, we classify it to edible.
+
+```{r}
+#Apply the tree model to test set
+yhat=predict(tree,newdata = test)
+tree.pred=rep("0",nrow(test))
+tree.pred[yhat>.5] = "1"
+table(tree.pred,test$edible)
+print(sprintf("The error rate of decision tree is: %f",
+              mean(tree.pred!=test$edible)))
+print(sprintf("The accuracy of decision tree is: %f",
+              mean(tree.pred==test$edible)))
+```
+We can see that Decision tree does improve the classification result and takes less time to run. The error rate is smaller than 1.5%. The next step is using cross_validation to determine the optimal level of tree complexity and whether we have to prune the tree.
+
+```{r}
+set.seed(23)
+#Cross validation
+cv_mushroom = cv.tree(tree)
+plot(cv_mushroom$size, cv_mushroom$dev, type="b")
+tree
+```
+In this case, cross-validation select the tree size as 12 nodes, which means we do not have to prune the tree in this case. Interpreting the terminal node 31) stalk.shape > 1.5:
+1. 69 samples under node 31) and overall prediction is edible
+2.The deviation is 0, showing that all the samples are in the right class.
+
+The next model is Random forest, which is an ensemble learning method for classification by constructing a multitude of decision trees at training time and outputting the class that is the mode of the classes (classification) of the individual trees.
+```{r}
+#bagging:mtry = number of all predictors; 
+#Random Forest:mtry = sqrt(number of all predictors) when classification
+t1 = proc.time()
+rf = randomForest(edible~., training, mtry=5, importance =T)
+rf
+t2 = proc.time()
+t=t2-t1
+print(paste0("The running time of random forest is:",t[3][[1]],'s'))
+```
+Random Forest takes much more times to run that logistic regression and decision tree. This is reasonable because random forest creates 500 trees to do the classification. For each split, 5 variables are tried.
+
+```{r}
+pred <- predict(rf,newdata = test, probability=TRUE)
+rf.pred=rep("0",nrow(test))
+rf.pred[pred>.5] = "1"
+table(rf.pred,test$edible)
+print(sprintf("The error rate of Random Forest is: %f",mean(rf.pred!=test$edible)))
+print(sprintf("The accuracy of Random forest is: %f",mean(rf.pred==test$edible)))
+```
+The accuracy of random forest is 100%! In this case, random forest can return the perfect classification.
+
+The next step is visualize the variable importance with two methods, IncNodePurity and %IncMSE. IncNodePurity measures the total decrease in the impurities using Gini Index from splitting on the vatiable, averaged over all trees. %IncMSE measures the increase in MSE of predictions as a result of variable i being permuted.
+```{r,echo=FALS}
+varimp <- data.frame(rf$importance)
+vi1 <- ggplot(varimp,aes(x=reorder(rownames(varimp),IncNodePurity), y=IncNodePurity))+
+  geom_bar(stat="identity", fill="yellow", colour="black") +
+  coord_flip() + theme_bw(base_size = 8) +
+  labs(title="Prediction using RandomForest", 
+       subtitle="Variable importance (IncNodePurity)", x="Variable", 
+       y="Variable importance (IncNodePurity)")
+vi2 <- ggplot(varimp, aes(x=reorder(rownames(varimp),X.IncMSE), y=X.IncMSE)) +
+  geom_bar(stat="identity", fill="green", colour="black") +
+  coord_flip() + theme_bw(base_size = 8) +
+  labs(title="Prediction using RandomForest", 
+       subtitle="Variable importance (%IncMSE)", x="Variable", 
+       y="Variable importance (%IncMSE)")
+grid.arrange(vi1, vi2, ncol=2)
+```
+Both of the methods show that "odor" is the most important attribute and the top 5 most important variables are: "odor","X.gill.color", "gill.size", "spore.print.color", and "ring.type". As we saw in the tree plot before, both of the five variables are used at least once to build the tree.
+
+By the way, it occurs to me that whether the accuracy can still be 100% if the classification method is bagging instead of Random Forest. (Set mtry = 22). Let's give a short investigation.
+```{r}
+#Bagging(mtry = No. of attributes)
+t1 = proc.time()
+bagging = randomForest(edible~., training, mtry=22, importance =T)
+t2 = proc.time()
+b.pred <- predict(bagging,newdata = test, probability=TRUE)
+bagging.pred=rep("0",nrow(test))
+bagging.pred[pred>.5] = "1"
+table(bagging.pred,test$edible)
+print(sprintf("The error rate of bagging is: %f",mean(bagging.pred!=test$edible)))
+print(sprintf("The accuracy of bagging is: %f",mean(bagging.pred==test$edible)))
+t=t2-t1
+print(paste0("The running time of bagging is:",t[3][[1]],'s'))
+```
+The classification accuracy is also 100%. In this case, we cannot determine which model is better. For further study, we can use cross validation the choose a better models. However, if we take the running time into consideration, random forest is better than bagging, for random forest takes only 5 attributes to build a tree other than taking all the attributes.
+
+After trying bagging and Random Forest, it is a good choice to use boosting method. Apply a Gradient Boosting Regression Tree(GBRT). Given the 100% accuracy of Random Forest, we can expect that the accuracy of Gradient Boosting is also 100%.
+Gradient boosting is a machine learning technique for regression and classification problems, which produces a prediction model in the form of an ensemble of weak prediction models, typically decision trees. It builds the model in a stage-wise fashion like other boosting methods do, and it generalizes them by allowing optimization of an arbitrary differentiable loss function.
+```{r}
+#In this case, the response has only 2 unique values, bernoulli is assumed. 
+#Otherwise, if the response is a factor, multinomial os assumed.
+t1 = proc.time()
+gbdt=gbm(edible~., data = training, distribution = "bernoulli",
+         n.trees =500,shrinkage = 0.1)
+gbdt
+t2 = proc.time()
+t=t2-t1
+print(paste0("The running time of boosting is:",t[3][[1]],'s'))
+```
+
+We can use gbm.perf function to find the best number of trees to use for the  prediction for the test data.
+```{r,echo=FALS}
+optimalTree = gbm.perf(gbdt)
+```
+
+According to the plot, we can see that with the increasing number of iteration, the deviance bocomes smaller and smaller.
+
+```{r}
+gbdt.pred <- predict(gbdt,newdata = test, 
+                     n.trees = optimalTree, type = "response")
+G_boosting.pred=rep("0",nrow(test))
+G_boosting.pred[pred>.5] = "1"
+table(G_boosting.pred,test$edible)
+print(sprintf("The error rate of Gradient Booosting is: %f",
+              mean(G_boosting.pred!=test$edible)))
+print(sprintf("The accuracy of Gradient Booosting is: %f",
+              mean(G_boosting.pred==test$edible)))
+```
+As expected, the accuracy of Gradient Boosting is also 100%.
+
+Based on the Gradient Boosting, use partial dependence plot. By marginalizing over the other features, we get a function that depends only ob features in S, interactions with other features included.
+Also, we can check the importance of each factors. As expected, the most 5 important factors given by gradient boosting are the same as random forest. 
+```{r,echo=FALS}
+vip(gbdt, bar = FALSE, horizontal = FALSE, size =1.5)
+```
+Given that the dataset has 22 attributes and the limitation of space, I choose the five most important factors and the three least important factors to make partial dependence plot:"odor","gill.size", "X.gill.color", "spore.print.color", and "ring.type".
+```{r}
+#Partial dependence plot
+p.odor <- gbdt %>% partial(pred.var = "odor", n.trees = 500) %>%
+  autoplot(smooth = TRUE, ylab = expression(f(odor)), main = "odor PDP")
+p.gill_size <- gbdt %>% partial(pred.var = "gill.size", n.trees = 500) %>%
+  autoplot(smooth = TRUE, ylab = expression(f(gill.size)), main = "gill.size PDP")
+p.gill_color<- gbdt %>% partial(pred.var = "gill.color", n.trees = 500) %>%
+  autoplot(smooth = TRUE, ylab = expression(f(gill.color)), main = "gill.color PDP")
+p.spore_print_color<- gbdt %>% partial(pred.var = "spore.print.color", n.trees = 500) %>%
+  autoplot(smooth = TRUE, ylab = expression(f(spore.print.color)), main = "spore.print.color PDP")
+p.ring_type<- gbdt %>% partial(pred.var = "ring.type", n.trees = 500) %>%
+  autoplot(smooth = TRUE, ylab = expression(f(ring.type)), main = "ring.type")
+```
+
+```{r warning=FALSE,,echo=FALS}
+grid.arrange(p.odor,p.gill_size,p.gill_color,p.spore_print_color,p.ring_type, ncol =2)
+```
+The plot above shows the relationship (according the model that we trained) between edible (target) and the five most important factors. The blue line is the smooth line. For example, for odor, with the mushroom first tend to be poisonous and then tend to be edible and finally tend to be poisonous as we increase the number of odor. For ring type, the mushroom first keep poisonous and then become edible when the ring type become the fifth type. The partial dependence plot of gill size shows that the mushroom tend to be more and more inedible.
+
+It seems that the top 5 most important variables have strong influence to decision the mushroom is edible or not. In the importance plot of random forest, we can find that the 5 variables have much more importance than the other attributes. What if we only use the five most important factors to train a GBDT model.
+```{r}
+#Boosting based on the five most important variables
+t1 = proc.time()
+gbdt_5=gbm(edible~odor + gill.size + gill.color + spore.print.color + ring.type, 
+           data = training, distribution = "bernoulli",n.trees =500,shrinkage = 0.1)
+gbdt_5
+t2 = proc.time()
+t=t2-t1
+print(paste0("The running time of boosting with five factors is:",t[3][[1]],'s'))
+```
+
+```{r}
+gbdt_5.pred <- predict(gbdt_5,newdata = test, n.trees = 500, type = "response")
+G_boosting_5.pred=rep("0",nrow(test))
+G_boosting_5.pred[pred>.5] = "1"
+table(G_boosting_5.pred,test$edible)
+print(sprintf("The error rate is: %f",mean(G_boosting_5.pred!=test$edible)))
+print(sprintf("The accuracy is: %f",mean(G_boosting_5.pred==test$edible)))
+```
+It seems that we only need the five most important variables to training a model and return a high classification accuracy. This is reasonable because the importance of other facotrs are close to 0 according to the variable importance plot. Use only five factors can save running time, which decreases from more than 3s to less than 1s.
+
+In this case, the predict accuracy of each model is: Logistic Regression < Decision Tree < Random Forest = Bagging = Gradient Boosting = 100%. This is reasonable, for the more complex models return the better classification results. 
+
+The running time of each model is: Decision Tree < Logistic Regression <  Boosting < Random Forest < Bagging.
+This is also not surprising, the simple models take less time to run. Boosting select the sample based on the error rate, while bagging select samples uniformly. Thus, in this case, boosting runs fast than bagging. However, under neural network condition, due to the parallel training, bagging and random forest can save more running time than boosting, for boosting has to generate the loss function in order. Also, in our case, Bagging takes much more time to run than Random Forest, because Bagging takes all the attributes to train a classifier while Random Forest only take a part of the attributes once.
